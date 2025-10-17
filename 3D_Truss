@@ -1,0 +1,118 @@
+%% 3D Truss Code for MATLAB
+clc; clear; close all;
+%% ---- Inputs / geometry / EA ----
+EA = 4.2e8; % N
+nodes = [ 0, 0, 0;                           % node 1
+          4, 0, 0;                           % node 2
+          2, 0, 2*sqrt(3);                   % node 3
+          2, (4*sqrt(6)/3), (2*sqrt(3)/3) ]; % node 4
+
+% element connectivity (which nodes each bar connects)
+elements = [4 1;
+            4 2;
+            4 3];
+
+Nnodes = size(nodes,1); %takes in number of nodes
+Ndof = 3*Nnodes; %calculates total DOF's of system
+
+%% ---- Assemble global stiffness K_global (12x12) ----
+% Local stiffness matrix = 6x6 (2nodes w 3DOF each)
+% Global 4 nodes 3 DOF each = 12x12
+K_global = zeros(Ndof, Ndof); %initialize global stiffness matrix
+for e = 1:size(elements,1) %loops through each elemenet in the structure
+    n1 = elements(e,1); %extracts node from the element [1 2]
+    n2 = elements(e,2);
+    node1 = nodes(n1,:);
+    node2 = nodes(n2,:);
+    Ke = bar3DStiffness(EA, node1, node2);   % 6x6 element stiffness
+    
+    % map local element DOFs to global DOF indices
+    dofMap = [ (n1-1)*3+1 : n1*3, (n2-1)*3+1 : n2*3 ];
+    K_global(dofMap,dofMap) = K_global(dofMap,dofMap) + Ke;
+end
+
+%% ---- Prescribed displacements ----
+u_full = zeros(Ndof,1);        % initialize full displacement vector [m]
+% DOFs for node i=[(i−1)⋅3+1, (i−1)⋅3+2, (i−1)⋅3+3] = [x, y, z]
+u_full( (4-1)*3 + 2 ) = 0.02;  % node 4 y DOF index = (node-1)*3 + 2 = displacement
+
+%% ---- External nodal forces ----
+F_global = zeros(Ndof,1);
+
+%% ---- Compute reactions ---- K*u=F
+% Reaction vector for all DOFs (nonzero entries at constrained DOFs)
+R_full = K_global * u_full - F_global;
+
+%% ---- Display results----
+disp('Nodal displacements:')
+for n = 1:Nnodes
+    ux = u_full((n-1)*3 + 1);
+    uy = u_full((n-1)*3 + 2);
+    uz = u_full((n-1)*3 + 3);
+    fprintf('Node %d: ux = %.6e m,  uy = %.6e m,  uz = %.6e m\n', n, ux, uy, uz);
+end
+
+disp('Reaction forces at nodes (R = K*u - F) [N]:')
+for n = 1:Nnodes
+    Rx = R_full((n-1)*3 + 1);
+    Ry = R_full((n-1)*3 + 2);
+    Rz = R_full((n-1)*3 + 3);
+    fprintf('Node %d -> Rx = %.6e N,  Ry = %.6e N,  Rz = %.6e N\n', n, Rx, Ry, Rz);
+end
+
+%% b. Rearrange eqn 63 and work around knowing EA as a unit
+elemIdx = 2;
+n1 = elements(elemIdx,1);
+n2 = elements(elemIdx,2);
+
+% node coordinates
+nodeA = nodes(n1, :);   % 1x3
+nodeB = nodes(n2, :);
+
+% element geometry
+dx = nodeB(1) - nodeA(1);
+dy = nodeB(2) - nodeA(2);
+dz = nodeB(3) - nodeA(3);
+L = sqrt(dx^2 + dy^2 + dz^2);
+cx = dx / L; cy = dy / L; cz = dz / L;
+
+% gather element DOF displacements [uA_x uA_y uA_z uB_x uB_y uB_z]
+ue = [ u_full((n1-1)*3 + 1);
+       u_full((n1-1)*3 + 2);
+       u_full((n1-1)*3 + 3);
+       u_full((n2-1)*3 + 1);
+       u_full((n2-1)*3 + 2);
+       u_full((n2-1)*3 + 3) ];
+
+% transformation (axial extension)
+T = [-cx, -cy, -cz, cx, cy, cz];
+
+% axial extension, axial force, strain
+delta = T * ue;            % scalar extension (m)
+N = (EA / L) * delta;      % axial force (N)  (EA = E*A)
+eps = N / EA;              % axial strain
+
+fprintf('Element %d between nodes %d-%d:\n', elemIdx, n1, n2);
+fprintf('  L = %.6g m,  c = [%.6g %.6g %.6g]\n', L, cx, cy, cz);
+fprintf('  axial extension delta = %.6e m\n', delta);
+fprintf('  axial force N = %.6e N\n', N);
+fprintf('  axial strain eps = %.6e\n', eps);
+
+%% ---- element stiffness function ----
+function K = bar3DStiffness(EA, node1, node2)
+    x1 = node1(1); y1 = node1(2); z1 = node1(3);
+    x2 = node2(1); y2 = node2(2); z2 = node2(3);
+
+    dx = x2 - x1; dy = y2 - y1; dz = z2 - z1;
+    L = sqrt(dx^2 + dy^2 + dz^2);
+    cx = dx / L; cy = dy / L; cz = dz / L;
+
+    K = (EA/L) * [ ...
+        cx^2,    cx*cy,   cx*cz,  -cx^2,   -cx*cy,   -cx*cz;
+        cx*cy,   cy^2,    cy*cz,  -cx*cy,  -cy^2,    -cy*cz;
+        cx*cz,   cy*cz,   cz^2,   -cx*cz,  -cy*cz,   -cz^2;
+       -cx^2,   -cx*cy,  -cx*cz,   cx^2,    cx*cy,    cx*cz;
+       -cx*cy,  -cy^2,   -cy*cz,   cx*cy,   cy^2,     cy*cz;
+       -cx*cz,  -cy*cz,  -cz^2,    cx*cz,   cy*cz,    cz^2 ];
+end
+% Note that generative AI was used to streamline and improve this code

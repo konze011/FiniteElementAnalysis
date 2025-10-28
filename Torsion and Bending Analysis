@@ -1,0 +1,66 @@
+clc;
+clearvars;
+
+E = 200*10^9;
+I = 1.57 * 10^(-4);
+G = 80 * 10^9; % Shear Modulus [Pa]
+J = 7.85 * 10^(-5); % Polar Moment of Inertia [m^4]
+L = 1; % Element Length [m]
+
+% Get stiffness matrix
+[K_global, F_global, u_global] = beamElementMatrix(E, I, G, J, L);
+
+% Display result
+disp('Global stiffness matrix [K_global]:')
+disp(K_global)
+
+% Example: apply known displacements to compute forces
+% u_vals = [0; 0; 0.01; 0; 0; 0];  % [w1 th1 w2 th2 phi1 phi2]
+% F_example = K_global * u_vals;
+
+% disp('Resulting nodal forces/torques:')
+% disp(F_example)
+
+function [K_global, F_global, u_global] = beamElementMatrix(E, I, G, J, L)
+% beamElementMatrix  Returns the 6x6 global stiffness matrix for a beam element
+% that includes bending about the y-axis and torsion about the x-axis.
+%
+% Inputs:
+%   E - Young's Modulus [Pa]
+%   I - Area Moment of Inertia [m^4]
+%   G - Shear Modulus [Pa]
+%   J - Polar Moment of Inertia [m^4]
+%   L - Element Length [m]
+%
+% Outputs:
+%   K_global - 6x6 element stiffness matrix
+%   F_global - Symbolic force vector {f1y, m1, f2y, m2, t1x, t2x}
+%   u_global - Symbolic displacement vector {w1, th1, w2, th2, phi1, phi2}
+
+    %% Define symbolic DOFs for clarity (optional)
+    syms w1 th1 w2 th2 phi1 phi2 f1y m1 f2y m2 t1x t2x real
+
+    %% Bending stiffness (4x4)
+    K_bending = (E*I/L^3) * [
+        12      6*L     -12     6*L;
+        6*L     4*L^2   -6*L    2*L^2;
+       -12     -6*L      12    -6*L;
+        6*L     2*L^2   -6*L    4*L^2
+    ];
+
+    %% Torsional stiffness (2x2)
+    K_torsion = (G*J/L) * [
+        1  -1;
+       -1   1
+    ];
+
+    %% Assemble into 6x6 global matrix
+    K_global = zeros(6);
+    K_global(1:4,1:4) = K_bending;
+    K_global(5:6,5:6) = K_torsion;
+
+    %% Define symbolic force and displacement vectors
+    u_global = [w1; th1; w2; th2; phi1; phi2];
+    F_global = [f1y; m1; f2y; m2; t1x; t2x];
+
+end

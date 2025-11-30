@@ -1,0 +1,213 @@
+%% ============================================================
+%  2D Plane Strain Triangular FEM with checks
+%% ============================================================
+
+clear; clc;
+
+%% ---- MATERIAL PROPERTIES ----
+E  = 210e9;   % Young's modulus (Pa)
+nu = 0.4;     % Poisson's ratio
+t  = 0.05;       % thickness (m)
+
+%% ---- NODE COORDINATES (x,y) ----
+nodes = [
+    0   0      % node 1
+    0   20      % node 2
+    20   20      % node 3
+    40   0      % node 4
+];
+
+%% ---- ELEMENT CONNECTIVITY (n1, n2, n3) ----
+elems = [
+    1 2 4
+    2 3 4
+];
+
+nNodes = size(nodes,1);
+nElem  = size(elems,1);
+
+%% ---- ASSEMBLE GLOBAL STIFFNESS ----
+K = zeros(2*nNodes);
+
+for e = 1:nElem
+    n = elems(e,:);
+    x = nodes(n,1);
+    y = nodes(n,2);
+
+    Ke = tri_K_element(x, y, E, nu, t);
+
+    fprintf('\nElement %d stiffness matrix Ke:\n', e);
+    disp(Ke);
+   
+    % global DOF map: (u1 v1 u2 v2 u3 v3)
+    dof = [2*n(1)-1, 2*n(1), ...
+           2*n(2)-1, 2*n(2), ...
+           2*n(3)-1, 2*n(3)];
+
+    K(dof,dof) = K(dof,dof) + Ke;
+end
+
+fprintf('Combined K Global Matrix');
+disp(K)
+%% ---- GLOBAL FORCE VECTOR ----
+F = zeros(2*nNodes,1);
+
+% Given loads at node 2:
+F(2*2-1) =  50e3;   % Fx = +50 kN
+F(2*2)   = 100e3;  % Fy = 100 kN
+
+%% ---- BOUNDARY CONDITIONS ----
+fixed = [
+    1 2   % node 1, v=0
+    3 1
+    3 2
+    4 1   % node 4, u=0
+    4 2   % node 4, v=0
+];
+
+fixed_dofs = [];
+for i = 1:size(fixed,1)
+    fixed_dofs(end+1) = 2*fixed(i,1)-2 + fixed(i,2);
+end
+
+free_dofs = setdiff(1:2*nNodes, fixed_dofs);
+
+%% ---- SOLVE KU = F ----
+u = zeros(2*nNodes,1);
+u(free_dofs) = K(free_dofs,free_dofs) \ F(free_dofs);
+
+fprintf('Reduced K Matrix');
+disp(K(free_dofs,free_dofs))
+fprintf('Known F Matrix');
+disp(F(free_dofs))
+fprintf('Solved Displacements');
+disp(u(free_dofs))
+
+fprintf('Complete Displacement Vector');
+disp(u)
+
+F_total=K*u;
+fprintf('Full Force Vector');
+disp(F_total)
+
+%% ============================
+%    ELEMENTAL STRESSES
+% ============================
+
+% Pre-allocate storage
+stress = zeros(nElem,4);   % [sig_x  sig_y  sig_z  tau_xy]
+
+for e = 1:nElem
+
+    % Nodes of this element
+    n = elems(e,:);
+
+    % Get element displacements [u1 v1 u2 v2 u3 v3]'
+    ue = [
+        u(2*n(1)-1);
+        u(2*n(1));
+        u(2*n(2)-1);
+        u(2*n(2));
+        u(2*n(3)-1);
+        u(2*n(3));
+    ];
+
+    % Extract coordinates
+    x = nodes(n,1);
+    y = nodes(n,2);
+
+    % --- Compute B-matrix (same as in Ke) ---
+    b1 = y(2) - y(3);   b2 = y(3) - y(1);   b3 = y(1) - y(2);
+    c1 = x(3) - x(2);   c2 = x(1) - x(3);   c3 = x(2) - x(1);
+
+    A = 0.5 * det([1 x(1) y(1); 1 x(2) y(2); 1 x(3) y(3)]);
+
+    B = (1/(2*A)) * [
+        b1 0   b2 0   b3 0
+        0  c1  0  c2  0  c3
+        c1 b1  c2 b2  c3 b3
+    ];
+
+    % --- Plane strain D matrix ---
+    D = (E / ((1+nu)*(1-2*nu))) * [
+        1-nu   nu      0
+        nu     1-nu    0
+        0      0       (1-2*nu)/2
+    ];
+
+    % --- Compute strains ---
+    eps = B * ue;      % [eps_x; eps_y; gamma_xy]
+
+    % --- Compute in-plane stresses ---
+    sigma = D * eps;
+
+    sigma_x  = sigma(1);
+    sigma_y  = sigma(2);
+    tau_xy   = sigma(3);
+
+    % --- Out-of-plane stress for PLANE STRAIN ---
+    sigma_z  = nu * (sigma_x + sigma_y);
+
+    stress(e,:) = [sigma_x sigma_y sigma_z tau_xy];
+
+  fprintf('\nElement %d B Matrix\n', e);
+    disp(B);
+  fprintf('\nElement %d Displacement \n', e);
+    disp(ue);
+  fprintf('\nElement %d Epsilon \n', e);
+    disp(eps);
+  fprintf('D Matrix', e);
+    disp(D);
+end
+
+%% ---- DISPLAY displacements----
+disp('----------------------------------------');
+disp(' NODAL DISPLACEMENTS (u, v in meters)');
+disp('----------------------------------------');
+
+for i=1:nNodes
+    fprintf('Node %d:   u = %12.6e   v = %12.6e\n', ...
+        i, u(2*i-1), u(2*i));
+end
+
+disp('----------------------------------------');
+%% Display stresses
+disp('----------------------------------------');
+disp(' ELEMENT STRESSES (Plane Strain)');
+disp(' [sigma_x   sigma_y   sigma_z   tau_xy] (Pa)');
+disp('----------------------------------------');
+for e = 1:nElem
+    fprintf('Element %d:  %12.6e  %12.6e  %12.6e  %12.6e\n', ...
+        e, stress(e,1), stress(e,2), stress(e,3), stress(e,4));
+end
+
+%% ============================================================
+%  ELEMENT STIFFNESS FUNCTION
+%% ============================================================
+function Ke = tri_K_element(x, y, E, nu, t)
+% Computes 6x6 stiffness matrix for a 3-node triangular element (plane strain)
+
+% compute β_i and γ_i
+b1 = y(2) - y(3);   b2 = y(3) - y(1);   b3 = y(1) - y(2);
+c1 = x(3) - x(2);   c2 = x(1) - x(3);   c3 = x(2) - x(1);
+
+% Area A = 1/2 * det(...)
+A = 0.5 * det([1 x(1) y(1); 1 x(2) y(2); 1 x(3) y(3)]);
+
+% B matrix (3x6)
+B = (1/(2*A)) * [
+    b1 0   b2 0   b3 0
+    0  c1  0  c2  0  c3
+    c1 b1  c2 b2  c3 b3
+];
+
+% Plane strain D matrix
+D = (E / ((1+nu)*(1-2*nu))) * [
+    1-nu   nu      0
+    nu     1-nu    0
+    0      0       (1-2*nu)/2
+];
+
+% element stiffness
+Ke = t * A * (B' * D * B);
+end

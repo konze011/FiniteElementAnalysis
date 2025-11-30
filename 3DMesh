@@ -1,0 +1,111 @@
+% HW_4_Code
+%% Undeformed Structure:
+% Refer to the code below to read the undeformed structure
+Data = readmatrix("Problem_4_deformations.xlsx","Range",'A2:D16');
+X = Data(:,1);
+Y = Data(:,2);
+
+U = Data(:,3);
+V = Data(:,4);
+
+%% Defining Triangular Connectivity
+Tricon = zeros(16,3); % 4 elements per column 
+for i = 1:4  % To see why this makes sense refer to the figure in HW document
+    Tricon(4*(i-1)+1,:) = [3*(i-1)+1, 3*i+1,     3*i+2]; 
+    Tricon(4*(i-1)+2,:) = [3*(i-1)+1, 3*(i-1)+2, 3*i+2];
+    Tricon(4*(i-1)+3,:) = [3*(i-1)+2, 3*i+2,     3*i+3];
+    Tricon(4*(i-1)+4,:) = [3*(i-1)+2, 3*(i-1)+3, 3*i+3];
+end
+%%
+figure(1)
+hold on
+trimesh(Tricon,X,Y,"Color","black")
+scatter(X,Y,"k*","LineWidth",2)
+scatter(X(1:3),Y(1:3),"r*","LineWidth",2)
+% legend(["Mesh","Nodes","Fixed Nodes"])
+hold off
+xlim([-2,10])
+ylim([-2,2])
+title("Undeformed")
+
+%% Plotting with X-displacements only 
+C_1 = U;
+
+
+figure(2)
+hold on
+% surf(X_surf,Y_surf,C_surf,"EdgeColor","none")
+trimesh(Tricon,X,Y,C_1,"LineWidth",2,"FaceColor",[0.5,0.5,0.5],"EdgeColor",[0,0,0])
+trimesh(Tricon,X,Y,-2.5*ones(size(X)),"EdgeColor","black","LineStyle","--","LineWidth",2)
+legend(["Displacements (in x) surface","Undeformed"])
+hold off
+xlim([-2,10])
+ylim([-2,2])
+view(3)
+title("Displacements (in x) surface")
+
+%% DON'T CHANGE ANYTHING TILL HERE
+%% Plotting with Y-displacements only
+C_2 = V;  % ****** ENTER CORRECT EQUATION HERE ******
+
+figure(3)
+hold on
+% surf(X_surf,Y_surf,C_surf,"EdgeColor","none")
+trimesh(Tricon,X,Y,C_2,"LineWidth",2,"FaceColor",[0.5,0.5,0.5],"EdgeColor",[0,0,0])
+trimesh(Tricon,X,Y,-2.5*ones(size(X)),"EdgeColor","black","LineStyle","--","LineWidth",2)
+legend(["Displacements (in y) surface","Undeformed"])
+hold off
+xlim([-2,10])
+ylim([-2,2])
+view(3)
+title("Displacements (in y) surface")
+%% Plotting overall displacements
+C_3 = U+V;% ****** ENTER CORRECT EQUATION HERE ****** 
+
+figure(4)
+hold on
+% surf(X_surf,Y_surf,C_surf,"EdgeColor","none")
+trimesh(Tricon,X,Y,C_3,"LineWidth",2,"FaceColor",[0.5,0.5,0.5],"EdgeColor",[0,0,0])
+trimesh(Tricon,X,Y,-2.5*ones(size(X)),"EdgeColor","black","LineStyle","--","LineWidth",2)
+legend(["Displacements surface","Undeformed"])
+hold off
+xlim([-2,10])
+ylim([-2,2])
+view(3)
+title("Displacements (overall) surface")
+
+%% INTERPOLATION WITH TRIANGULAR ELEMENTS (Blue-dotted line)
+% u_interp = zeros(4,1);
+v_interp = zeros(4,1);
+x_plot = zeros(4,1);
+
+for j = 1:4  % 4 nodes picked from 4 triangles
+    Node_id_1 = 3*(j-1) + 2; %bottom edge
+    Node_id_2 = 3*(j-1) + 3; %bottom edge
+    Node_id_3 = 3*j + 3; %top vertex of triangle
+
+    V_1 = V(Node_id_1);
+    V_2 = V(Node_id_2);
+    V_3 = V(Node_id_3);
+
+    N_1 = 0.5;  % ****** ENTER CORRECT VALUE HERE ****** 
+    N_2 = 0.5;  % ****** ENTER CORRECT VALUE HERE ****** 
+    N_3 = 0;  % ****** ENTER CORRECT VALUE HERE ****** 
+
+    N_Vec = [N_1, N_2, N_3];
+    V_Vec = [V_1; V_2; V_3];
+
+    v_interp(j) = N_Vec*V_Vec; %corrected capitalization
+
+    x_plot(j) = (j-1)*2; % midpoint
+
+end
+
+figure(5)
+plot(x_plot,v_interp)
+title("Displacements in y-direction (interpolated)")
+xlabel("Undeformed x coordinate") 
+ylabel("Displacement in y-direction")
+
+
+% END OF CODE

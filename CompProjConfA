@@ -1,0 +1,490 @@
+clear; clc; close all;
+
+%% CONSTANTS
+% Properties of ASME A335 Steel Truss Components
+modulus = 210e9;              % Young's modulus [Pa]
+yeild = 205e6;                % Yeild Strength [Pa]
+densitySteel = 7850;          % Density of steel [kg/m^3]
+
+crossSecArea = 0.012;       % Cross-sectional area [m^2]
+safetyFactor = 1.5;         % Safety Factor [-]
+
+% Geometry
+baseLength = 10;       % Base width of tower pinned to ground [m]
+floorHeight = 3.5;     % Height of each floor [m]
+taperAngle = 85;       % Taper angle from vertical [degrees]
+
+% Loading
+levelLoad = 600e3;        % Load per level (N)  (each floor has bottom and top levels)
+lateralLoad = 75e3;       % Lateral load on leftmost (negative-x) nodes (N)
+
+% allowable (design) stress (use yield / safety factor)
+allowableStress = yeild / safetyFactor;
+
+%% USER INPUT - Take in number of floors 
+numFloors = input('Enter number of floors to analyze: ');
+
+%% Calculate Geometric Limits
+% Width reduction per floor
+width_reduction = 2 * floorHeight * tand(90 - taperAngle); % from angle in degrees
+
+% Check number of floors that can fit above given base length 
+% (before floor length is zero or negative)
+geometricLimit = floor(baseLength / width_reduction); 
+% floor() function rounds down to nearest integer
+
+fprintf('\n=== GEOMETRIC LIMIT ===\n');
+fprintf('Purely Geometric Limit: %d floors\n', geometricLimit);
+
+% Check if requested floors exceed geometric limit
+if numFloors > geometricLimit
+    warning('Requested floors (%d) exceed geometric limit (%d). Using maximum.', ...
+        numFloors, geometricLimit);
+    numFloors = geometricLimit;
+end
+
+%% ---------------------------
+%% Build structure for user numFloors (main analysis)
+%% ---------------------------
+
+% Build nodes/elements for the requested number of floors
+[currentCoords, currentElems, nodeCount] = buildGeometry(numFloors, baseLength, floorHeight, width_reduction);
+
+%% --- FORCE VECTOR ASSEMBLY ---
+numDOF = nodeCount * 2;
+F = zeros(numDOF,1);   % global force vector
+
+% 1. Apply lateral load (+75 kN X-direction) to nodes with negative x
+for n = 1:nodeCount
+    x = currentCoords(n,1);
+    if x < 0
+        dof_x = 2*n - 1;   % x DOF index
+        F(dof_x) = F(dof_x) + lateralLoad;
+    end
+end
+
+% 2. Apply vertical loads (levelLoad per level downward)
+uniqueY = unique(currentCoords(1:nodeCount,2));  % all unique levels (may be unsorted)
+uniqueY = sort(uniqueY);                         % ensure bottom->top ordering
+
+for i = 1:length(uniqueY)
+    yLevel = uniqueY(i);
+
+    % nodes on this level
+    levelNodes = find(currentCoords(1:nodeCount,2) == yLevel);
+
+    numNodesOnLevel = length(levelNodes);
+
+    % distributed load per node (negative = downward)
+    loadPerNode = -levelLoad / numNodesOnLevel;
+
+    % apply to each node's Y DOF
+    for k = 1:numNodesOnLevel
+        n = levelNodes(k);
+        dof_y = 2*n;   % Y DOF index
+        F(dof_y) = F(dof_y) + loadPerNode;
+    end
+end
+
+%% Global K Assembly
+numDOF = nodeCount * 2;
+K = zeros(numDOF, numDOF);
+
+for e = 1:size(currentElems,1)
+
+    % Node indices
+    n1 = currentElems(e,1);
+    n2 = currentElems(e,2);
+
+    % Coordinates
+    x1 = currentCoords(n1,1);  y1 = currentCoords(n1,2);
+    x2 = currentCoords(n2,1);  y2 = currentCoords(n2,2);
+
+    % Compute geometry
+    dx = x2 - x1;
+    dy = y2 - y1;
+    L = sqrt(dx^2 + dy^2);
+
+    c = dx / L;
+    s = dy / L;
+
+    % Element stiffness constant
+    k = (crossSecArea * modulus) / L;
+
+    % Element global stiffness (4x4)
+    Ke = k * [
+        c*c     c*s     -c*c    -c*s;
+        c*s     s*s     -c*s    -s*s;
+        -c*c    -c*s    c*c     c*s;
+        -c*s    -s*s    c*s     s*s
+    ];
+
+    % Global DOF indices
+    dofs = [
+        2*n1-1, 2*n1, ...
+        2*n2-1, 2*n2
+    ];
+
+    % Assembly into global K
+    K(dofs, dofs) = K(dofs, dofs) + Ke;
+
+end
+
+%% Reduced K based on boundary conditions
+% Find all nodes at the lowest y level
+y_all = currentCoords(1:nodeCount, 2);
+y_bottom = min(y_all);
+bottomNodes = find(y_all == y_bottom);
+
+% DOFs to constrain: both x and y for every bottom node
+fixedDOF = [];
+for n = bottomNodes'
+    fixedDOF = [fixedDOF, 2*n-1, 2*n];   % (ux_n, uy_n)
+end
+fixedDOF = unique(fixedDOF);  % safety
+
+allDOF = 1:(nodeCount*2);
+freeDOF = setdiff(allDOF, fixedDOF);
+
+K_reduced = K(freeDOF, freeDOF);
+F_reduced = F(freeDOF);
+
+% Solve
+U_reduced = K_reduced \ F_reduced;
+
+% Full displacement vector
+U = zeros(nodeCount*2, 1);
+U(freeDOF) = U_reduced;
+
+%% === AXIAL FORCES IN ELEMENTS ===
+numElems = size(currentElems,1);
+axialForce = zeros(numElems,1);
+
+for e = 1:numElems
+    n1 = currentElems(e,1);
+    n2 = currentElems(e,2);
+
+    % Node coordinates
+    x1 = currentCoords(n1,1); y1 = currentCoords(n1,2);
+    x2 = currentCoords(n2,1); y2 = currentCoords(n2,2);
+
+    dx = x2 - x1;
+    dy = y2 - y1;
+    L  = sqrt(dx^2 + dy^2);
+
+    c = dx/L;
+    s = dy/L;
+
+    % Displacement vector for the element [ux1 uy1 ux2 uy2]'
+    ue = [U(2*n1-1); U(2*n1); U(2*n2-1); U(2*n2)];
+
+    % Transformation vector
+    T = [-c -s  c  s];
+
+    % Axial force
+    axialForce(e) = (crossSecArea * modulus / L) * (T * ue);
+end
+
+%% === STRESSES IN EACH ELEMENT ===
+stress = axialForce / crossSecArea;
+
+disp('Element Stresses (Pa):');
+disp(stress);
+
+disp('Element Axial Forces (positive = tension, negative = compression):');
+disp(axialForce);
+
+%% --- FINAL OUTPUT ---
+fprintf('\n==For %d number of floors==\n', numFloors)
+fprintf('\nTotal Nodes = %d\n', nodeCount);
+fprintf('Total Elements = %d\n', size(currentElems,1));
+
+disp('Node Coordinates:');
+disp(currentCoords(1:nodeCount,:));
+
+disp('Global Force Vector F:');
+disp(F);
+
+fprintf("\nGlobal stiffness matrix K assembled. Size = %d x %d\n", size(K));
+
+disp('NODAL DISPLACEMENTS (Ux, Uy)');
+for n = 1:nodeCount
+    fprintf('Node %2d:  Ux = %+10.6e m,   Uy = %+10.6e m\n', ...
+        n, U(2*n-1), U(2*n));
+end
+
+%% === PLOT DEFORMED SHAPE WITH NODE DOTS & LABELS ===
+
+scale = 100;   % deformation scale factor (adjust for visibility)
+
+figure; hold on; grid on;
+title('Deformed and Undeformed Truss Shape (nodes labeled)');
+xlabel('X (m)');
+ylabel('Y (m)');
+axis equal;
+
+% Plot undeformed truss (light gray)
+for e = 1:size(currentElems,1)
+    n1 = currentElems(e,1);
+    n2 = currentElems(e,2);
+
+    plot([currentCoords(n1,1), currentCoords(n2,1)], ...
+         [currentCoords(n1,2), currentCoords(n2,2)], '-', 'Color', [0.6 0.6 0.6], 'LineWidth', 1);
+end
+
+% Compute deformed coordinates
+coords_def = currentCoords;
+for n = 1:nodeCount
+    coords_def(n,1) = currentCoords(n,1) + scale * U(2*n-1);
+    coords_def(n,2) = currentCoords(n,2) + scale * U(2*n);
+end
+
+% Plot deformed truss (red)
+for e = 1:size(currentElems,1)
+    n1 = currentElems(e,1);
+    n2 = currentElems(e,2);
+
+    plot([coords_def(n1,1), coords_def(n2,1)], ...
+         [coords_def(n1,2), coords_def(n2,2)], 'r-', 'LineWidth', 2);
+end
+
+% Plot node markers (undeformed positions) as black dots
+scatter(currentCoords(1:nodeCount,1), currentCoords(1:nodeCount,2), 40, 'k', 'filled');
+
+% Label nodes at deformed positions (red text)
+for n = 1:nodeCount
+    text(coords_def(n,1)+0.02, coords_def(n,2)+0.02, sprintf('%d', n), ...
+         'FontSize',9,'FontWeight','bold','Color','b');
+end
+
+legend('Undeformed','Deformed (scaled)','Node positions','Location','best');
+hold off;
+
+%% === DETERMINE MAXIMUM FLOORS BEFORE YIELDING ===
+% We'll rebuild and analyze the tower for floor counts from 1..geometricLimit, and
+% find the highest floor count whose maximum absolute element stress < allowableStress.
+
+maxSafeFloors = 0;
+stressHistory = zeros(geometricLimit,1);
+
+% Prepare constants struct to pass into helper function
+consts.modulus = modulus;
+consts.crossSecArea = crossSecArea;
+consts.lateralLoad = lateralLoad;
+consts.levelLoad = levelLoad;
+consts.floorHeight = floorHeight;
+consts.width_reduction = width_reduction;
+consts.baseLength = baseLength;
+
+for nf = 1:geometricLimit
+    % compute maximum absolute stress for configuration with nf floors
+    maxAbsStress_nf = analyzeMaxStressForFloors(nf, consts);
+    stressHistory(nf) = maxAbsStress_nf;
+    
+    if maxAbsStress_nf <= allowableStress
+        maxSafeFloors = nf;  % still safe at this nf
+    else
+        % exceeded allowable stress; no need to check larger nf? Continue to find threshold explicitly
+        % break;  % optional early exit - but we'll continue to record stresses
+    end
+end
+
+fprintf('\n=== MAXIMUM FLOORS BEFORE YIELD ===\n');
+fprintf('Allowable design stress = %.2f MPa (yield/safetyFactor)\n', allowableStress/1e6);
+fprintf('Maximum floors that remain below allowable stress: %d floors (geometric limit = %d)\n', maxSafeFloors, geometricLimit);
+
+% Optionally print the first failing floor (if any)
+firstFailIdx = find(stressHistory > allowableStress, 1, 'first');
+if ~isempty(firstFailIdx)
+    fprintf('First floor count causing yield (first exceed): %d (max element stress = %.2f MPa)\n', ...
+        firstFailIdx, stressHistory(firstFailIdx)/1e6);
+else
+    fprintf('No floor count up to geometric limit causes yield under current loading.\n');
+end
+
+%% OPTIONAL: plot stress vs number of floors
+figure;
+plot(1:geometricLimit, stressHistory/1e6, '-o', 'LineWidth', 1.6);
+hold on;
+yline(allowableStress/1e6, '--r', 'LineWidth', 1.4);
+xlabel('Number of Floors');
+ylabel('Max |Element Stress| (MPa)');
+title('Max Element Stress vs Number of Floors');
+grid on;
+legend('Max |stress|','Allowable stress');
+
+%% ===============================
+%% Helper function: buildGeometry
+%% ===============================
+function [coords, elems, nodeCount] = buildGeometry(numFloors, baseLength, floorHeight, width_reduction)
+    % Builds node coordinates and element connectivity for given number of floors
+    maxNodes = 5 + (numFloors-1)*3;
+    coords = zeros(maxNodes, 2);
+    elems = [];
+    nodeCount = 0;
+    currentWidth = baseLength;
+
+    for f = 1:numFloors
+        y_bottom = (f-1)*floorHeight;
+        y_top    = f*floorHeight;
+
+        if f == 1
+            % Bottom nodes 1,2,3
+            x1 = -currentWidth/2;  
+            x2 = 0;
+            x3 = +currentWidth/2;
+
+            coords(1,:) = [x1, y_bottom];
+            coords(2,:) = [x2, y_bottom];
+            coords(3,:) = [x3, y_bottom];
+
+            % Top nodes 4,5
+            x4 = -currentWidth/2 + width_reduction/2;
+            x5 = +currentWidth/2 - width_reduction/2;
+
+            coords(4,:) = [x4, y_top];
+            coords(5,:) = [x5, y_top];
+
+            nodeFloor = [1 2 3 4 5]; 
+            nodeCount = 5;
+        else
+            prev_4 = nodeFloor(4);
+            prev_5 = nodeFloor(5);
+
+            node1 = prev_4;
+            node2 = nodeCount + 1;
+            node3 = prev_5;
+
+            coords(node2,:) = [0, y_bottom];
+            nodeCount = nodeCount + 1;
+
+            currentWidth = currentWidth - width_reduction;
+
+            x4 = -currentWidth/2;
+            x5 = +currentWidth/2;
+
+            node4 = nodeCount + 1;
+            node5 = nodeCount + 2;
+
+            coords(node4,:) = [x4, y_top];
+            coords(node5,:) = [x5, y_top];
+
+            nodeCount = nodeCount + 2;
+
+            nodeFloor = [node1, node2, node3, node4, node5];
+        end
+
+        % Build elements for this floor
+        n1 = nodeFloor(1); n2 = nodeFloor(2); n3 = nodeFloor(3);
+        n4 = nodeFloor(4); n5 = nodeFloor(5);
+
+        newElems = [
+            n1 n2;
+            n2 n3;
+            n4 n5;
+            n3 n5;
+            n1 n4;
+            n2 n4;
+            n2 n5
+        ];
+
+        elems = [elems; newElems];
+    end
+
+    % Trim coords to actual nodeCount rows
+    coords = coords(1:nodeCount, :);
+end
+
+%% =========================================
+%% Helper function: analyzeMaxStressForFloors
+%% =========================================
+function maxAbsStress = analyzeMaxStressForFloors(numFloorsLocal, consts)
+    % Builds the geometry, assembles K and F, applies BCs, solves, computes stresses
+    % returns maximum absolute element stress for the configuration with numFloorsLocal floors.
+
+    % Unpack constants
+    modulus = consts.modulus;
+    crossSecArea = consts.crossSecArea;
+    lateralLoad = consts.lateralLoad;
+    levelLoad = consts.levelLoad;
+    floorHeight = consts.floorHeight;
+    width_reduction = consts.width_reduction;
+    baseLength = consts.baseLength;
+
+    % Build geometry
+    [coordsLocal, elemsLocal, nodeCountLocal] = buildGeometry(numFloorsLocal, baseLength, floorHeight, width_reduction);
+
+    % Assemble force vector
+    F_local = zeros(nodeCountLocal*2,1);
+    for n = 1:nodeCountLocal
+        if coordsLocal(n,1) < 0
+            F_local(2*n-1) = F_local(2*n-1) + lateralLoad;
+        end
+    end
+
+    uniqueYlocal = sort(unique(coordsLocal(:,2)));
+    for i = 1:length(uniqueYlocal)
+        levelNodes = find(coordsLocal(:,2) == uniqueYlocal(i));
+        loadPerNode = -levelLoad / numel(levelNodes);
+        for k = 1:numel(levelNodes)
+            n = levelNodes(k);
+            F_local(2*n) = F_local(2*n) + loadPerNode;
+        end
+    end
+
+    % Assemble global stiffness
+    K_local = zeros(nodeCountLocal*2);
+    for e = 1:size(elemsLocal,1)
+        n1 = elemsLocal(e,1); n2 = elemsLocal(e,2);
+        x1 = coordsLocal(n1,1); y1 = coordsLocal(n1,2);
+        x2 = coordsLocal(n2,1); y2 = coordsLocal(n2,2);
+        dx = x2 - x1; dy = y2 - y1;
+        L = sqrt(dx^2 + dy^2);
+        c = dx / L; s = dy / L;
+        k = (crossSecArea * modulus) / L;
+        Ke = k * [
+            c*c     c*s     -c*c    -c*s;
+            c*s     s*s     -c*s    -s*s;
+            -c*c    -c*s    c*c     c*s;
+            -c*s    -s*s    c*s     s*s
+        ];
+        dofs = [2*n1-1, 2*n1, 2*n2-1, 2*n2];
+        K_local(dofs, dofs) = K_local(dofs, dofs) + Ke;
+    end
+
+    % Boundary conditions: fix bottom nodes
+    y_bottom_local = min(coordsLocal(:,2));
+    bottomNodes_local = find(coordsLocal(:,2) == y_bottom_local);
+    fixedDOF_local = [];
+    for n = bottomNodes_local'
+        fixedDOF_local = [fixedDOF_local, 2*n-1, 2*n];
+    end
+    fixedDOF_local = unique(fixedDOF_local);
+    allDOF_local = 1:(nodeCountLocal*2);
+    freeDOF_local = setdiff(allDOF_local, fixedDOF_local);
+
+    Kred = K_local(freeDOF_local, freeDOF_local);
+    Fred = F_local(freeDOF_local);
+
+    % Solve (guard against ill-conditioned by using backslash)
+    Ured = Kred \ Fred;
+    Ufull = zeros(nodeCountLocal*2,1);
+    Ufull(freeDOF_local) = Ured;
+
+    % Compute axial forces & stresses
+    axial_local = zeros(size(elemsLocal,1),1);
+    for e = 1:size(elemsLocal,1)
+        n1 = elemsLocal(e,1); n2 = elemsLocal(e,2);
+        x1 = coordsLocal(n1,1); y1 = coordsLocal(n1,2);
+        x2 = coordsLocal(n2,1); y2 = coordsLocal(n2,2);
+        dx = x2 - x1; dy = y2 - y1;
+        L = sqrt(dx^2 + dy^2);
+        c = dx/L;  u= dy/L;
+        ue = [Ufull(2*n1-1); Ufull(2*n1); Ufull(2*n2-1); Ufull(2*n2)];
+        T = [-c -s c s];
+        axial_local(e) = (crossSecArea * modulus / L) * (T * ue);
+    end
+    stress_local = axial_local / crossSecArea;
+
+    maxAbsStress = max(abs(stress_local));
+end
